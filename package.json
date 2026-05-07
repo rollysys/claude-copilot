@@ -1,0 +1,59 @@
+{
+  "name": "claude-copilot",
+  "version": "0.1.0",
+  "description": "Non-interactive CLI helper for GitHub Copilot. Reads the OAuth token from the official @github/copilot CLI and adds -p/--bare/--json one-shot prompt support.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/auth.js",
+  "types": "./dist/auth.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/auth.d.ts",
+      "import": "./dist/auth.js"
+    },
+    "./parse-args": {
+      "types": "./dist/parse-args.d.ts",
+      "import": "./dist/parse-args.js"
+    }
+  },
+  "bin": {
+    "claude-copilot": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "undici": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.0.0"
+  },
+  "keywords": [
+    "github-copilot",
+    "copilot",
+    "cli",
+    "claude"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rollysys/claude-copilot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rollysys/claude-copilot/issues"
+  },
+  "homepage": "https://github.com/rollysys/claude-copilot#readme"
+}
