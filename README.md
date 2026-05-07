@@ -95,13 +95,19 @@ All subcommands accept `--json` for machine-readable output.
 
 ## Platform support
 
-| Platform | Auto token lookup | Manual via `GH_COPILOT_TOKEN` |
-|---|---|---|
-| macOS    | ✅ via `security` CLI (Keychain) | ✅ |
-| Linux    | ❌ | ✅ |
-| Windows  | ❌ | ✅ |
+Token resolution order (first hit wins):
 
-On Linux/Windows, get your token from wherever the official CLI stored it (e.g. `secret-tool` on Linux with libsecret) and export it as `GH_COPILOT_TOKEN`.
+1. `GH_COPILOT_TOKEN` env var
+2. macOS Keychain (`security find-generic-password -s copilot-cli`)
+3. Linux libsecret (`secret-tool search/lookup service copilot-cli`) — install `libsecret-tools` (`apt install libsecret-tools`)
+4. Plaintext config: `~/.copilot/config.json` `copilot_tokens` field
+
+| Platform | Default storage by `copilot login` | Auto-detected? |
+|---|---|---|
+| macOS    | Keychain | ✅ |
+| Linux    | libsecret (or plaintext if libsecret unavailable) | ✅ if `secret-tool` is on PATH; otherwise via plaintext config |
+| Windows  | Credential Manager (not parsed by this tool) | Use `GH_COPILOT_TOKEN` |
+| Headless / CI | n/a | Use `GH_COPILOT_TOKEN` |
 
 ## Library use
 

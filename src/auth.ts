@@ -22,6 +22,9 @@
  */
 
 import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
 // Honor HTTPS_PROXY for global fetch — Node's built-in fetch does not by default.
@@ -108,8 +111,61 @@ interface CopilotModelsResponse {
   }>;
 }
 
+function readTokenFromMacKeychain(): string | undefined {
+  try {
+    const out = execSync('security find-generic-password -s copilot-cli -w', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readTokenFromLibSecret(): string | undefined {
+  try {
+    const search = execSync('secret-tool search --all service copilot-cli', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const m = search.match(/attribute\.account\s*=\s*(.+)/);
+    if (!m) return undefined;
+    const account = m[1].trim();
+    const out = execSync('secret-tool lookup service copilot-cli account ' + JSON.stringify(account), {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readTokenFromConfigFile(): string | undefined {
+  try {
+    const configPath = join(homedir(), '.copilot', 'config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as {
+      copilot_tokens?: Record<string, string>;
+    };
+    if (!config.copilot_tokens) return undefined;
+    for (const v of Object.values(config.copilot_tokens)) {
+      if (typeof v === 'string' && v.trim().length > 0) return v.trim();
+    }
+  } catch {
+    // file missing / unreadable / unparseable — not fatal
+  }
+  return undefined;
+}
+
 /**
  * Read the GitHub OAuth token issued to the official `copilot` CLI.
+ *
+ * Resolution order:
+ *   1. `GH_COPILOT_TOKEN` environment variable
+ *   2. macOS Keychain (`security find-generic-password`)
+ *   3. Linux libsecret (`secret-tool`)
+ *   4. Plaintext config at `~/.copilot/config.json` (cross-platform fallback)
  *
  * @throws {CopilotAuthError} kind=`NotLoggedIn` if no token can be located.
  */
@@ -117,24 +173,27 @@ export function readCopilotToken(): string {
   if (process.env.GH_COPILOT_TOKEN) return process.env.GH_COPILOT_TOKEN;
 
   if (process.platform === 'darwin') {
-    try {
-      return execSync('security find-generic-password -s copilot-cli -w', {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-    } catch {
-      throw new CopilotAuthError(
-        'NotLoggedIn',
-        'No copilot CLI token found in macOS keychain. ' +
-          'Install the official CLI (`npm i -g @github/copilot`) and run `copilot login`.'
-      );
-    }
+    const fromKeychain = readTokenFromMacKeychain();
+    if (fromKeychain) return fromKeychain;
+  } else if (process.platform === 'linux') {
+    const fromSecret = readTokenFromLibSecret();
+    if (fromSecret) return fromSecret;
   }
+
+  const fromConfig = readTokenFromConfigFile();
+  if (fromConfig) return fromConfig;
 
   throw new CopilotAuthError(
     'NotLoggedIn',
-    `Auto-detection of the copilot CLI token is not supported on ${process.platform}. ` +
-      'Set the `GH_COPILOT_TOKEN` environment variable to your GitHub OAuth token.'
+    'Could not find a copilot CLI token. Please:\n' +
+      '  1. Install the official CLI: `npm i -g @github/copilot`\n' +
+      '  2. Run: `copilot login`\n' +
+      'Token sources tried:\n' +
+      '  - GH_COPILOT_TOKEN environment variable\n' +
+      (process.platform === 'darwin' ? '  - macOS Keychain (service: copilot-cli)\n' : '') +
+      (process.platform === 'linux' ? '  - libsecret via `secret-tool` (install libsecret-tools if missing)\n' : '') +
+      '  - ~/.copilot/config.json copilot_tokens map\n' +
+      'On headless or unsupported setups, set GH_COPILOT_TOKEN directly.'
   );
 }
 

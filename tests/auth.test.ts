@@ -1,16 +1,30 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('readCopilotToken', () => {
-  const origEnv = { ...process.env };
   const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const origHome = process.env.HOME;
+  const origUserProfile = process.env.USERPROFILE;
+  let tmpHome = '';
 
   beforeEach(() => {
     delete process.env.GH_COPILOT_TOKEN;
+    // Isolate ~/.copilot/config.json lookup from the host's real home.
+    tmpHome = mkdtempSync(join(tmpdir(), 'claude-copilot-test-'));
+    process.env.HOME = tmpHome;
+    process.env.USERPROFILE = tmpHome;
     vi.resetModules();
   });
 
   afterEach(() => {
-    process.env = { ...origEnv };
+    if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
+    delete process.env.GH_COPILOT_TOKEN;
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = origUserProfile;
     if (origPlatform) Object.defineProperty(process, 'platform', origPlatform);
   });
 
@@ -20,7 +34,20 @@ describe('readCopilotToken', () => {
     expect(readCopilotToken()).toBe('gho_FAKE_FOR_TEST');
   });
 
-  it('throws NotLoggedIn on unsupported platform without env var', async () => {
+  it('reads from ~/.copilot/config.json copilot_tokens map', async () => {
+    mkdirSync(join(tmpHome, '.copilot'));
+    writeFileSync(
+      join(tmpHome, '.copilot', 'config.json'),
+      JSON.stringify({
+        copilot_tokens: { 'https://github.com:user': 'gho_FROM_CONFIG' },
+      })
+    );
+    Object.defineProperty(process, 'platform', { value: 'aix', configurable: true });
+    const { readCopilotToken } = await import('../src/auth.js');
+    expect(readCopilotToken()).toBe('gho_FROM_CONFIG');
+  });
+
+  it('throws NotLoggedIn when no token source is available', async () => {
     Object.defineProperty(process, 'platform', { value: 'aix', configurable: true });
     const { readCopilotToken, CopilotAuthError } = await import('../src/auth.js');
     expect(() => readCopilotToken()).toThrowError(CopilotAuthError);
