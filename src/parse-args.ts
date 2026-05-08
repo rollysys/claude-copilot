@@ -1,26 +1,16 @@
 /**
- * CLI argument parser. Pure function, no I/O — easy to test.
+ * CLI argument parser. Pure function, no I/O.
  */
 
-export const KNOWN_COMMANDS = new Set([
-  'status',
-  'login',
-  'logout',
-  'models',
-  'usage',
-  'test',
-]);
+export type Command = 'serve' | 'status' | 'test' | 'env' | 'help';
+
+export const KNOWN_COMMANDS: Command[] = ['serve', 'status', 'test', 'env', 'help'];
 
 export interface CliOptions {
-  command?: string;
-  prompt?: string;
-  bare: boolean;
-  json: boolean;
-  model: string;
-  stream: boolean;
-  system?: string;
-  maxTokens?: number;
-  help: boolean;
+  command: Command;
+  host: string;
+  port: number;
+  log: boolean;
 }
 
 export interface ParseArgsResult {
@@ -28,18 +18,20 @@ export interface ParseArgsResult {
   errors: string[];
 }
 
-export function parseArgs(argv: string[], defaultModel: string): ParseArgsResult {
+const DEFAULTS = {
+  host: '127.0.0.1',
+  port: 4141,
+} as const;
+
+export function parseArgs(argv: string[]): ParseArgsResult {
   const options: CliOptions = {
-    bare: false,
-    json: false,
-    model: defaultModel,
-    stream: true,
-    help: false,
+    command: 'serve',
+    host: DEFAULTS.host,
+    port: DEFAULTS.port,
+    log: false,
   };
   const errors: string[] = [];
   const positional: string[] = [];
-  let promptViaFlag: string | undefined;
-  let promptFlagSeen = false;
 
   const requireValue = (flag: string, i: number): string | undefined => {
     const v = argv[i + 1];
@@ -52,59 +44,33 @@ export function parseArgs(argv: string[], defaultModel: string): ParseArgsResult
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '-p' || a === '--print') {
-      promptFlagSeen = true;
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('-')) {
-        promptViaFlag = next;
-        i += 1;
-      }
-    } else if (a === '--bare') {
-      options.bare = true;
-    } else if (a === '--json') {
-      options.json = true;
-    } else if (a === '--stream') {
-      options.stream = true;
-    } else if (a === '--no-stream') {
-      options.stream = false;
-    } else if (a === '-h' || a === '--help') {
-      options.help = true;
-    } else if (a === '--model' || a === '-m') {
+    if (a === '-h' || a === '--help') {
+      options.command = 'help';
+    } else if (a === '--log') {
+      options.log = true;
+    } else if (a === '--host') {
       const v = requireValue(a, i);
-      if (v !== undefined) {
-        options.model = v;
-        i += 1;
-      }
-    } else if (a.startsWith('--model=')) {
-      options.model = a.slice('--model='.length);
-    } else if (a.startsWith('-m=')) {
-      options.model = a.slice('-m='.length);
-    } else if (a === '--system' || a === '-s') {
-      const v = requireValue(a, i);
-      if (v !== undefined) {
-        options.system = v;
-        i += 1;
-      }
-    } else if (a.startsWith('--system=')) {
-      options.system = a.slice('--system='.length);
-    } else if (a === '--max-tokens') {
+      if (v !== undefined) { options.host = v; i += 1; }
+    } else if (a.startsWith('--host=')) {
+      options.host = a.slice('--host='.length);
+    } else if (a === '--port' || a === '-p') {
       const v = requireValue(a, i);
       if (v !== undefined) {
         const n = Number(v);
-        if (Number.isNaN(n) || n <= 0) {
-          errors.push(`--max-tokens expects a positive number, got '${v}'`);
+        if (!Number.isInteger(n) || n < 0 || n > 65535) {
+          errors.push(`--port expects an integer 0..65535, got '${v}'`);
         } else {
-          options.maxTokens = n;
+          options.port = n;
         }
         i += 1;
       }
-    } else if (a.startsWith('--max-tokens=')) {
-      const v = a.slice('--max-tokens='.length);
+    } else if (a.startsWith('--port=')) {
+      const v = a.slice('--port='.length);
       const n = Number(v);
-      if (Number.isNaN(n) || n <= 0) {
-        errors.push(`--max-tokens expects a positive number, got '${v}'`);
+      if (!Number.isInteger(n) || n < 0 || n > 65535) {
+        errors.push(`--port expects an integer 0..65535, got '${v}'`);
       } else {
-        options.maxTokens = n;
+        options.port = n;
       }
     } else if (a.startsWith('-')) {
       errors.push(`unknown flag '${a}'`);
@@ -113,19 +79,16 @@ export function parseArgs(argv: string[], defaultModel: string): ParseArgsResult
     }
   }
 
-  if (positional.length && KNOWN_COMMANDS.has(positional[0])) {
-    options.command = positional.shift();
-  }
-  if (promptFlagSeen || positional.length) {
-    options.prompt = promptViaFlag ?? positional.join(' ');
-  }
-
-  if (options.bare && options.json) {
-    errors.push('--bare and --json are mutually exclusive');
-  }
-  if (options.json && options.stream) {
-    // JSON mode implies a single response object — disable stream.
-    options.stream = false;
+  if (positional.length > 0) {
+    const cmd = positional[0];
+    if ((KNOWN_COMMANDS as string[]).includes(cmd)) {
+      options.command = cmd as Command;
+    } else {
+      errors.push(`unknown command '${cmd}'`);
+    }
+    if (positional.length > 1) {
+      errors.push(`unexpected extra arguments: ${positional.slice(1).join(' ')}`);
+    }
   }
 
   return { options, errors };

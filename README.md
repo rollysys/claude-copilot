@@ -1,17 +1,20 @@
 # claude-copilot
 
-A non-interactive CLI helper for [GitHub Copilot](https://github.com/features/copilot). Reads the OAuth token already stored by the official [`@github/copilot`](https://www.npmjs.com/package/@github/copilot) CLI and adds shell-friendly flags (`-p`, `--bare`, `--json`, stdin pipes, streaming) so you can call Copilot from scripts and one-liners.
+A local Anthropic-compatible HTTP proxy that lets [Claude Code](https://claude.com/claude-code) (and any other Anthropic-API client) talk to Claude models through your **GitHub Copilot Business** subscription.
 
 ```sh
-$ claude-copilot --bare -p "Write a one-liner to find files larger than 10MB"
-find . -type f -size +10M
+$ claude-copilot serve --port 4242
+claude-copilot proxy listening on http://127.0.0.1:4242
+User:     you (business)
+Upstream: https://api.business.githubcopilot.com
 
-$ echo "explain this error" | claude-copilot --model claude-opus-4.6
-…streaming response…
-
-$ claude-copilot --json status | jq .plan
-"business"
+# In another shell:
+$ eval "$(claude-copilot env --port 4242)"
+$ claude --model opus --print "Hello"
+Hello!
 ```
+
+`claude` now sends every request to your local proxy, which forwards it to Copilot using the OAuth token already stored by the official `@github/copilot` CLI. **No double subscription** — every call consumes your normal Copilot Premium quota.
 
 ---
 
@@ -22,124 +25,143 @@ This project is **not affiliated with, endorsed by, or sponsored by GitHub, Micr
 - "GitHub Copilot" is a trademark of GitHub, Inc.
 - "Claude" is a trademark of Anthropic, PBC.
 
-This tool reads the OAuth token that the official `@github/copilot` CLI stores after `copilot login`, then calls the GitHub Copilot API on your behalf. It does **NOT** bypass authentication, billing, or quota — every request consumes the same Copilot quota that the official CLI does.
+This tool reads the OAuth token that the official `@github/copilot` CLI stores after `copilot login`, then proxies Anthropic-style requests to the Copilot API on your behalf. It does **NOT** bypass authentication, billing, or quota — every request consumes the same Copilot Premium quota the official CLI does.
 
 ## ⚠️ API Stability
 
-This tool relies on Copilot endpoints (`/copilot_internal/user`, `/chat/completions`, `/models`) that are **not formally documented public APIs**. GitHub may change them at any time, which would break this tool. If that happens, file an issue and we'll catch up.
+The Copilot endpoints we call (`/copilot_internal/user`, `/v1/messages`, `/models`) are **not formally documented public APIs**. GitHub may change them at any time. If that happens, file an issue and we'll catch up.
 
 ---
 
+## How it works
+
+```
+   Claude Code  ─POST /v1/messages──▶  127.0.0.1:4242 (this proxy)
+                                                │
+                                  rewrites:
+                                   • Bearer token from your copilot CLI
+                                   • Copilot-Integration-Id: copilot-developer-cli
+                                   • model id: claude-opus-4-7 → claude-opus-4.7
+                                   • drops anthropic-beta tokens Copilot rejects
+                                   • clamps output_config.effort to "medium"
+                                                │
+                                                ▼
+                            api.business.githubcopilot.com/v1/messages
+                                                │
+                                                ▼
+                                  Anthropic-format response
+                                  (streams through verbatim)
+```
+
+The upstream natively returns Anthropic format, so the response body and SSE stream pass through untouched.
+
 ## Install
 
-Prerequisite: install and log in with the official CLI first.
+Prerequisite: install and log in with the official Copilot CLI first.
 
 ```sh
 npm i -g @github/copilot
 copilot login
 ```
 
-Then install this helper:
+Then install this proxy:
 
 ```sh
 npm i -g claude-copilot
 ```
 
-## Usage
-
-### One-shot prompt
+Or from source:
 
 ```sh
-claude-copilot -p "your question"
-claude-copilot -p "..." --bare              # answer body only
-claude-copilot -p "..." --model claude-opus-4.6
-claude-copilot -p "..." --no-stream
-claude-copilot -p "..." --json              # full response object
-echo "..." | claude-copilot                 # read from stdin
-echo "..." | claude-copilot -p              # explicit -p with stdin
+git clone https://github.com/rollysys/claude-copilot.git
+cd claude-copilot && npm install && npm run build && npm link
 ```
 
-### Subcommands
+## Usage
 
-| Command | Description |
+### Start the proxy
+
+```sh
+claude-copilot serve --port 4242 --log
+```
+
+`--log` prints one line per forwarded request to stderr.
+
+### Point Claude Code at it
+
+```sh
+eval "$(claude-copilot env --port 4242)"
+claude --model opus --print "Hello"
+```
+
+`claude-copilot env` prints `export ANTHROPIC_BASE_URL=...`, `ANTHROPIC_API_KEY=...`, and `ANTHROPIC_DEFAULT_*_MODEL=...` lines you can `eval`. Run `unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL` to revert.
+
+### Other commands
+
+| Command | What it does |
 |---|---|
-| `claude-copilot status` | Login info, plan, and API endpoint |
-| `claude-copilot models` | List available models for your plan |
-| `claude-copilot usage`  | Quota usage (chat / completions / premium) |
-| `claude-copilot test`   | End-to-end chat API smoke test |
-| `claude-copilot login` / `logout` | Informational only — use `copilot login/logout` |
-
-All subcommands accept `--json` for machine-readable output.
+| `claude-copilot serve` *(default)* | Start the local proxy. |
+| `claude-copilot env [--port N]` | Print shell exports to wire Claude Code to the proxy. |
+| `claude-copilot status` | Show login info, Copilot plan, upstream endpoint, and integration id. |
+| `claude-copilot test` | One-shot smoke test of the upstream `/v1/messages` (skips the proxy). |
 
 ### Flags
 
 | Flag | Default | Notes |
 |---|---|---|
-| `-p, --print <text>` |  | The prompt. Omit to read from stdin. |
-| `--bare` | off | Stdout = answer body only. Errors silently `exit 1/2`. |
-| `--json` | off | Emit JSON. Implies `--no-stream`. |
-| `-m, --model <id>` | `gpt-4.1` (overridable) | Model ID. Run `models` to see what's available. |
-| `-s, --system <text>` |  | System prompt. |
-| `--max-tokens <n>` | (none) | `max_tokens` cap. |
-| `--no-stream` | streaming on | Disable streaming. |
-| `-h, --help` |  | Show help. |
+| `-p, --port <n>` | `4141` | Port to listen on. |
+| `--host <ip>` | `127.0.0.1` | Bind address. Set to `0.0.0.0` to expose to LAN. |
+| `--log` | off | Log every forwarded request to stderr. |
+| `-h, --help` | | Show help. |
 
 ### Environment variables
 
 | Variable | Purpose |
 |---|---|
-| `GH_COPILOT_TOKEN` | Provide the token directly (skips keychain lookup). Required on Linux/Windows. |
-| `COPILOT_INTEGRATION_ID` | Override `Copilot-Integration-Id` header. |
-| `COPILOT_DEFAULT_MODEL` | Override the default `--model`. |
-| `HTTPS_PROXY` / `HTTP_PROXY` | Forward all fetch through proxy. Honored automatically. |
+| `GH_COPILOT_TOKEN` | Provide the token directly (skips keychain lookup). Required on Windows. |
+| `COPILOT_INTEGRATION_ID` | Override the `Copilot-Integration-Id` header. |
+| `COPILOT_DROP_BETAS` | Comma-separated extra `anthropic-beta` tokens to silently drop. |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Forward upstream fetch through a proxy. Honored automatically. |
 
-## Platform support
+## Token resolution
 
-Token resolution order (first hit wins):
-
-1. `GH_COPILOT_TOKEN` env var
-2. macOS Keychain (`security find-generic-password -s copilot-cli`)
-3. Linux libsecret (`secret-tool search/lookup service copilot-cli`) — install `libsecret-tools` (`apt install libsecret-tools`)
-4. Plaintext config: `~/.copilot/config.json` `copilot_tokens` field
-
-| Platform | Default storage by `copilot login` | Auto-detected? |
-|---|---|---|
-| macOS    | Keychain | ✅ |
-| Linux    | libsecret (or plaintext if libsecret unavailable) | ✅ if `secret-tool` is on PATH; otherwise via plaintext config |
-| Windows  | Credential Manager (not parsed by this tool) | Use `GH_COPILOT_TOKEN` |
-| Headless / CI | n/a | Use `GH_COPILOT_TOKEN` |
+| Source | Tried when |
+|---|---|
+| `GH_COPILOT_TOKEN` env var | Always first |
+| macOS Keychain (`security find-generic-password -s copilot-cli`) | macOS |
+| Linux libsecret (`secret-tool search/lookup service copilot-cli`) | Linux, if `secret-tool` is on PATH (`apt install libsecret-tools`) |
+| `~/.copilot/config.json` `copilot_tokens` field | Cross-platform fallback (set `storeTokenPlaintext` in that file before `copilot login`) |
 
 ## Library use
 
-```ts
-import {
-  readCopilotToken,
-  fetchCopilotUser,
-  getChatHeaders,
-  listModels,
-} from 'claude-copilot';
+The token reader and HTTP server are exported for embedding:
 
-const token = readCopilotToken();
-const user = await fetchCopilotUser(token);
-const models = await listModels(token, user.endpoints.api);
+```ts
+import { startProxy, fetchCopilotUser, readCopilotToken } from 'claude-copilot';
+
+const handle = await startProxy({ port: 0 /* random free port */ });
+console.log(`Listening on http://${handle.host}:${handle.port}`);
+// ... handle.stop() when done
 ```
 
 ## Development
 
 ```sh
-npm i
+npm install
+npm run typecheck
 npm run build
 npm test
 ```
 
-The repo is laid out as:
+Layout:
 
 ```
 src/
-├── auth.ts        # token reader + API helpers
-├── parse-args.ts  # pure CLI parser (heavily tested)
-├── sse.ts         # OpenAI-style SSE chunk parser
-└── cli.ts         # CLI entry; ties it together
+├── auth.ts        # token reader + Copilot user API + global proxy dispatcher
+├── model-map.ts   # claude-opus-4-7  → claude-opus-4.7  (and date-stamp stripping)
+├── server.ts      # HTTP proxy: rewrites headers + body, forwards /v1/messages
+├── parse-args.ts  # pure CLI parser
+└── cli.ts         # CLI entry
 ```
 
 ## License

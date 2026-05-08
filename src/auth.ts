@@ -25,16 +25,18 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 
-// Honor HTTPS_PROXY for global fetch — Node's built-in fetch does not by default.
+// Honor HTTPS_PROXY/HTTP_PROXY/NO_PROXY for global fetch — Node's built-in fetch
+// ignores these by default. EnvHttpProxyAgent reads them per-request and
+// correctly bypasses the proxy for hosts matched by NO_PROXY (e.g. 127.0.0.1).
 {
-  const proxy =
+  const hasProxy =
     process.env.HTTPS_PROXY ||
     process.env.https_proxy ||
     process.env.HTTP_PROXY ||
     process.env.http_proxy;
-  if (proxy) setGlobalDispatcher(new ProxyAgent(proxy));
+  if (hasProxy) setGlobalDispatcher(new EnvHttpProxyAgent());
 }
 
 const COPILOT_USER_URL = 'https://api.github.com/copilot_internal/user';
@@ -54,7 +56,6 @@ export const COPILOT_INTEGRATION_ID =
 
 export const COPILOT_API_VERSION = '2026-01-09';
 export const COPILOT_USER_AGENT = `claude-copilot/0.1 (${process.platform} ${process.arch})`;
-export const COPILOT_CHAT_ENDPOINT = '/chat/completions';
 
 export type CopilotAuthErrorKind =
   | 'NotLoggedIn'
