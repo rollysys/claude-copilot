@@ -1,7 +1,7 @@
 {
   "name": "claude-copilot",
   "version": "0.1.0",
-  "description": "Non-interactive CLI helper for GitHub Copilot. Reads the OAuth token from the official @github/copilot CLI and adds -p/--bare/--json one-shot prompt support.",
+  "description": "Local Anthropic-compatible proxy that lets Claude Code (and any Anthropic-API client) talk to Claude models through your GitHub Copilot Business subscription.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/auth.js",
