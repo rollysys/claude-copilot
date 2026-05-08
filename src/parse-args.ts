@@ -2,15 +2,25 @@
  * CLI argument parser. Pure function, no I/O.
  */
 
-export type Command = 'serve' | 'status' | 'test' | 'env' | 'help';
+export type Command = 'serve' | 'run' | 'env' | 'settings' | 'status' | 'test' | 'help';
 
-export const KNOWN_COMMANDS: Command[] = ['serve', 'status', 'test', 'env', 'help'];
+export const KNOWN_COMMANDS: Command[] = [
+  'serve',
+  'run',
+  'env',
+  'settings',
+  'status',
+  'test',
+  'help',
+];
 
 export interface CliOptions {
   command: Command;
   host: string;
   port: number;
   log: boolean;
+  /** Args after `run` (and any `claude-copilot` flags before `--`). */
+  passthroughArgs: string[];
 }
 
 export interface ParseArgsResult {
@@ -29,6 +39,7 @@ export function parseArgs(argv: string[]): ParseArgsResult {
     host: DEFAULTS.host,
     port: DEFAULTS.port,
     log: false,
+    passthroughArgs: [],
   };
   const errors: string[] = [];
   const positional: string[] = [];
@@ -42,8 +53,21 @@ export function parseArgs(argv: string[]): ParseArgsResult {
     return v;
   };
 
+  // Special-case `run`: stop parsing after we see it; everything else is the
+  // child's argv. `port`, `host`, `log`, `--` separator are still ours when
+  // they appear *before* `run`.
+  let runIndex = -1;
+
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    if (a === 'run' && runIndex < 0 && options.command === 'serve') {
+      runIndex = i;
+      options.command = 'run';
+      options.passthroughArgs = argv.slice(i + 1);
+      // Filter out an optional leading `--` (from `claude-copilot run -- claude --print foo`).
+      if (options.passthroughArgs[0] === '--') options.passthroughArgs.shift();
+      break;
+    }
     if (a === '-h' || a === '--help') {
       options.command = 'help';
     } else if (a === '--log') {
@@ -79,7 +103,7 @@ export function parseArgs(argv: string[]): ParseArgsResult {
     }
   }
 
-  if (positional.length > 0) {
+  if (runIndex < 0 && positional.length > 0) {
     const cmd = positional[0];
     if ((KNOWN_COMMANDS as string[]).includes(cmd)) {
       options.command = cmd as Command;

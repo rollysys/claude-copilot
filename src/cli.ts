@@ -4,12 +4,15 @@
  * talk to Claude models through a GitHub Copilot Business subscription.
  *
  * Usage:
- *   claude-copilot serve [--port 4141] [--host 127.0.0.1] [--log]
- *   claude-copilot env   [--port 4141]   # print export commands
- *   claude-copilot status                # show login + endpoint info
- *   claude-copilot test                  # one-shot upstream smoke test
+ *   claude-copilot run [-- claude-args...]   # one-command, auto-managed proxy
+ *   claude-copilot serve [--port N] [--log]  # long-running proxy
+ *   claude-copilot env   [--port N]          # print shell exports
+ *   claude-copilot settings [--port N]       # print Claude settings.json snippet
+ *   claude-copilot status                    # show login + endpoint info
+ *   claude-copilot test                      # one-shot upstream smoke test
  */
 
+import { spawn } from 'node:child_process';
 import {
   COPILOT_API_VERSION,
   COPILOT_INTEGRATION_ID,
@@ -18,41 +21,65 @@ import {
   fetchCopilotUser,
   readCopilotToken,
 } from './auth.js';
-
-const COPILOT_MESSAGES_ENDPOINT = '/v1/messages';
 import { type CliOptions, parseArgs } from './parse-args.js';
 import { startProxy } from './server.js';
+
+const COPILOT_MESSAGES_ENDPOINT = '/v1/messages';
+const CLAUDE_BIN = process.env.CLAUDE_COPILOT_CLAUDE_PATH || 'claude';
+
+function buildClaudeEnv(baseUrl: string): Record<string, string> {
+  return {
+    ANTHROPIC_BASE_URL: baseUrl,
+    ANTHROPIC_API_KEY: 'ignored-by-claude-copilot',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4.6',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4.6',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4.5',
+  };
+}
 
 function printHelp(): void {
   process.stdout.write(`claude-copilot — local Anthropic-compatible proxy backed by GitHub Copilot
 
 Usage:
-  claude-copilot [serve] [--port 4141] [--host 127.0.0.1] [--log]
-  claude-copilot env [--port 4141]
-  claude-copilot status
-  claude-copilot test
+  claude-copilot run [-- claude args...]      # easiest: spawn claude with proxy auto-attached
+  claude-copilot [serve] [--port N] [--log]   # long-running proxy daemon
+  claude-copilot env [--port N]               # shell-export snippet for ANTHROPIC_*
+  claude-copilot settings [--port N]          # JSON snippet for ~/.claude/settings.json
+  claude-copilot status                       # login info + plan + endpoint
+  claude-copilot test                         # one-shot upstream smoke test
 
-Commands:
-  serve   Start the local proxy (default).
-  env     Print shell export commands to point Claude Code at the proxy.
-  status  Show login info, plan, and upstream endpoint.
-  test    Send one Anthropic-format request through to the upstream and print the response.
-
-Flags:
+Common flags (apply to serve, env, settings):
   -p, --port <n>     Port to listen on (default 4141)
       --host <ip>    Bind address (default 127.0.0.1)
-      --log          Log every forwarded request to stderr
+      --log          Log every forwarded request to stderr (serve/run only)
   -h, --help         Show this help
 
-Typical use:
-  $ claude-copilot serve --port 4141 --log &
-  $ eval "$(claude-copilot env --port 4141)"
-  $ claude     # Claude Code now uses your Copilot subscription
+Recommended use:
+
+  # Single command, no env pollution, no orphan processes:
+  claude-copilot run -- --print "Hello"
+  claude-copilot run                            # interactive Claude Code
+  claude-copilot run -- --model opus --print "..."
+
+Long-running daemon (advanced):
+
+  claude-copilot serve --port 4242 --log &
+  eval "\$(claude-copilot env --port 4242)"
+  claude
+
+Project-scoped settings.json (no shell pollution):
+
+  mkdir -p .claude
+  claude-copilot settings --port 4242 > .claude/settings.local.json
+  claude-copilot serve --port 4242 &
+  claude            # picks up settings.local.json automatically
 
 Environment:
-  GH_COPILOT_TOKEN          Override token from keychain
-  COPILOT_INTEGRATION_ID    Override Copilot integration id
-  HTTPS_PROXY               Forward upstream fetch through a proxy
+  CLAUDE_COPILOT_CLAUDE_PATH   Path to the \`claude\` binary (default: \`claude\` on PATH)
+  GH_COPILOT_TOKEN             Override token from keychain
+  COPILOT_INTEGRATION_ID       Override Copilot integration id
+  COPILOT_DROP_BETAS           Extra anthropic-beta tokens to silently drop (comma-separated)
+  HTTPS_PROXY                  Forward upstream fetch through a proxy
 `);
 }
 
@@ -65,11 +92,13 @@ async function main(): Promise<void> {
   }
 
   switch (options.command) {
-    case 'help':   return printHelp();
-    case 'serve':  return runServe(options);
-    case 'env':    return runEnv(options);
-    case 'status': return runStatus();
-    case 'test':   return runTest();
+    case 'help':     return printHelp();
+    case 'serve':    return runServe(options);
+    case 'run':      return runRun(options);
+    case 'env':      return runEnv(options);
+    case 'settings': return runSettings(options);
+    case 'status':   return runStatus();
+    case 'test':     return runTest();
   }
 }
 
@@ -85,9 +114,12 @@ async function runServe(options: CliOptions): Promise<void> {
       `User:     ${handle.user.login} (${handle.user.copilot_plan})\n` +
       `Upstream: ${handle.upstreamBaseUrl}\n` +
       `\n` +
-      `Use it with Claude Code:\n` +
+      `For one-shot use without setting any env vars, prefer:\n` +
+      `  claude-copilot run -- --print "Hello"\n` +
+      `\n` +
+      `Otherwise wire Claude Code to this proxy with one of:\n` +
       `  eval "$(claude-copilot env --port ${handle.port})"\n` +
-      `  claude\n` +
+      `  claude-copilot settings --port ${handle.port} > .claude/settings.local.json\n` +
       `\n` +
       `Press Ctrl-C to stop.\n`
   );
@@ -101,18 +133,76 @@ async function runServe(options: CliOptions): Promise<void> {
   process.on('SIGTERM', shutdown);
 }
 
+async function runRun(options: CliOptions): Promise<void> {
+  // Always pick a free port unless the user explicitly asked for one.
+  const handle = await startProxy({
+    host: options.host,
+    port: options.port === 4141 ? 0 : options.port,  // default → ephemeral
+    log: options.log,
+  });
+
+  const baseUrl = `http://${handle.host}:${handle.port}`;
+  if (options.log) {
+    process.stderr.write(`claude-copilot proxy: ${baseUrl} (user=${handle.user.login}, plan=${handle.user.copilot_plan})\n`);
+  }
+
+  const child = spawn(CLAUDE_BIN, options.passthroughArgs, {
+    stdio: 'inherit',
+    env: { ...process.env, ...buildClaudeEnv(baseUrl) },
+  });
+
+  // Forward signals other than SIGINT (which the TTY already broadcasts).
+  const forward = (sig: NodeJS.Signals) => () => { try { child.kill(sig); } catch { /* ignore */ } };
+  process.on('SIGTERM', forward('SIGTERM'));
+  process.on('SIGHUP', forward('SIGHUP'));
+  // Suppress SIGINT in the parent: the TTY already delivers it to the child,
+  // and we want to wait for child cleanup before exiting.
+  process.on('SIGINT', () => { /* noop; let child handle */ });
+
+  const exitInfo = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+    child.on('exit', (code, signal) => resolve({ code, signal }));
+    child.on('error', err => {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') {
+        process.stderr.write(`error: \`${CLAUDE_BIN}\` not found on PATH. Install Claude Code or set CLAUDE_COPILOT_CLAUDE_PATH.\n`);
+        resolve({ code: 127, signal: null });
+      } else {
+        process.stderr.write(`error spawning ${CLAUDE_BIN}: ${err.message}\n`);
+        resolve({ code: 1, signal: null });
+      }
+    });
+  });
+
+  await handle.stop();
+
+  if (exitInfo.signal) {
+    // Convention: 128 + signal number; we don't have a clean way to look the
+    // number up, so just exit non-zero.
+    process.exit(1);
+  }
+  process.exit(exitInfo.code ?? 0);
+}
+
 function runEnv(options: CliOptions): void {
   const base = `http://${options.host}:${options.port}`;
-  process.stdout.write(
-    [
-      `export ANTHROPIC_BASE_URL=${base}`,
-      `export ANTHROPIC_API_KEY=ignored-by-claude-copilot`,
-      `export ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4.6`,
-      `export ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4.6`,
-      `export ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4.5`,
-      `# Run \`unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL\` to revert.`,
-    ].join('\n') + '\n'
-  );
+  const env = buildClaudeEnv(base);
+  const lines = Object.entries(env).map(([k, v]) => `export ${k}=${shellQuote(v)}`);
+  lines.push(`# Run \`unset ${Object.keys(env).join(' ')}\` to revert.`);
+  process.stdout.write(lines.join('\n') + '\n');
+}
+
+function runSettings(options: CliOptions): void {
+  const base = `http://${options.host}:${options.port}`;
+  const env = buildClaudeEnv(base);
+  const settings = {
+    env,
+  };
+  process.stdout.write(JSON.stringify(settings, null, 2) + '\n');
+}
+
+function shellQuote(s: string): string {
+  if (/^[A-Za-z0-9_./:-]+$/.test(s)) return s;
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 async function runStatus(): Promise<void> {

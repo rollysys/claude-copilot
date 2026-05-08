@@ -132,6 +132,9 @@ async function handle(
   }));
 }
 
+/** Tokens discovered to be unsupported at runtime (in addition to hardcoded set). */
+const RUNTIME_DROP_BETAS = new Set<string>();
+
 async function forwardMessages(
   req: IncomingMessage,
   res: ServerResponse,
@@ -142,13 +145,47 @@ async function forwardMessages(
   const rawBody = await readBody(req);
   const { body, originalModel, mappedModel, stream } = rewriteRequestBody(rawBody);
 
-  const upstreamRes = await fetch(`${upstreamBaseUrl}/v1/messages`, {
+  const headers = buildUpstreamHeaders(req, token);
+  const upstreamUrl = `${upstreamBaseUrl}/v1/messages`;
+  const signal = abortSignalFor(req);
+
+  let upstreamRes = await fetch(upstreamUrl, {
     method: 'POST',
-    headers: buildUpstreamHeaders(req, token),
+    headers,
     body: new Uint8Array(body),
-    // Pass through abort if the client disconnects.
-    signal: abortSignalFor(req),
+    signal,
   });
+
+  // Adaptive retry: if Copilot rejects an `anthropic-beta` token we don't
+  // know about yet, learn it and try once more.
+  if (upstreamRes.status === 400 && headers['anthropic-beta']) {
+    const errText = await upstreamRes.text();
+    const learned = parseUnsupportedBetas(errText);
+    if (learned.length > 0) {
+      for (const t of learned) RUNTIME_DROP_BETAS.add(t);
+      const refiltered = filterAnthropicBeta(
+        headers['anthropic-beta'],
+        new Set([...DROP_BETAS, ...RUNTIME_DROP_BETAS])
+      );
+      if (refiltered) headers['anthropic-beta'] = refiltered;
+      else delete headers['anthropic-beta'];
+      if (log) {
+        process.stderr.write(`  learned unsupported beta(s): ${learned.join(',')} — retrying\n`);
+      }
+      upstreamRes = await fetch(upstreamUrl, {
+        method: 'POST',
+        headers,
+        body: new Uint8Array(body),
+        signal,
+      });
+    } else {
+      // Reconstruct a Response so the rest of the function can read text/body.
+      upstreamRes = new Response(errText, {
+        status: 400,
+        headers: upstreamRes.headers,
+      });
+    }
+  }
 
   // Build response headers, dropping hop-by-hop ones.
   const outHeaders: Record<string, string> = {};
@@ -203,8 +240,16 @@ interface RewrittenBody {
   stream: boolean;
 }
 
-/** Effort levels Copilot accepts on Anthropic models (others get clamped). */
+/** Effort levels Copilot accepts on the models that DO support effort. */
 const SUPPORTED_EFFORT = new Set(['medium']);
+
+/** Models that don't accept any reasoning_effort field at all. */
+function modelSupportsEffort(model: string): boolean {
+  if (!model) return false;
+  // Claude Haiku family doesn't support reasoning effort on Copilot.
+  if (model.startsWith('claude-haiku-')) return false;
+  return true;
+}
 
 export function rewriteAnthropicBody(parsed: Record<string, unknown>): {
   body: Record<string, unknown>;
@@ -213,21 +258,36 @@ export function rewriteAnthropicBody(parsed: Record<string, unknown>): {
   let changed = false;
   const out: Record<string, unknown> = { ...parsed };
 
+  let mappedModel = '';
   if (typeof out.model === 'string') {
     const mapped = mapModelToCopilot(out.model);
+    mappedModel = mapped;
     if (mapped !== out.model) {
       out.model = mapped;
       changed = true;
     }
   }
 
-  // Clamp `output_config.effort` to a supported value (Copilot only takes "medium" today).
+  // output_config.effort handling:
+  //   - models that don't support effort → drop the whole output_config
+  //     (rebuilding it without the effort key would leave an empty object)
+  //   - models that do support effort but with restricted values → clamp
   const oc = out.output_config;
   if (oc && typeof oc === 'object' && !Array.isArray(oc)) {
     const ocObj = oc as Record<string, unknown>;
-    if (typeof ocObj.effort === 'string' && !SUPPORTED_EFFORT.has(ocObj.effort)) {
-      out.output_config = { ...ocObj, effort: 'medium' };
-      changed = true;
+    if ('effort' in ocObj) {
+      if (!modelSupportsEffort(mappedModel)) {
+        const { effort: _drop, ...rest } = ocObj;
+        if (Object.keys(rest).length === 0) {
+          delete out.output_config;
+        } else {
+          out.output_config = rest;
+        }
+        changed = true;
+      } else if (typeof ocObj.effort === 'string' && !SUPPORTED_EFFORT.has(ocObj.effort)) {
+        out.output_config = { ...ocObj, effort: 'medium' };
+        changed = true;
+      }
     }
   }
 
@@ -266,6 +326,7 @@ function rewriteRequestBody(raw: Buffer): RewrittenBody {
  */
 const HARDCODED_DROP_BETAS = new Set([
   'advisor-tool-2026-03-01',
+  'context-1m-2025-08-07',
 ]);
 
 function buildDropBetas(): Set<string> {
@@ -288,6 +349,20 @@ export function filterAnthropicBeta(value: string, drop: Set<string> = DROP_BETA
     .map(s => s.trim())
     .filter(s => s && !drop.has(s));
   return kept.length > 0 ? kept.join(',') : undefined;
+}
+
+/**
+ * Parse an upstream 400 message like
+ *   `unsupported beta header(s): foo, bar`
+ * and return the offending tokens. Returns [] for any other error.
+ */
+export function parseUnsupportedBetas(errBody: string): string[] {
+  const m = errBody.match(/unsupported beta header\(s\):\s*([^"}\n]+)/i);
+  if (!m) return [];
+  return m[1]
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
 }
 
 function buildUpstreamHeaders(req: IncomingMessage, token: string): Record<string, string> {

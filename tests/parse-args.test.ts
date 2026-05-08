@@ -10,6 +10,7 @@ describe('parseArgs', () => {
       host: '127.0.0.1',
       port: 4141,
       log: false,
+      passthroughArgs: [],
     });
   });
 
@@ -81,5 +82,64 @@ describe('parseArgs', () => {
     expect(errors).toEqual([]);
     expect(options.command).toBe('env');
     expect(options.port).toBe(5050);
+  });
+
+  it('settings command', () => {
+    const { options } = parseArgs(['settings', '--port', '8080']);
+    expect(options.command).toBe('settings');
+    expect(options.port).toBe(8080);
+  });
+
+  describe('run command', () => {
+    it('captures passthrough args verbatim', () => {
+      const { options, errors } = parseArgs(['run', '--print', 'hello']);
+      expect(errors).toEqual([]);
+      expect(options.command).toBe('run');
+      expect(options.passthroughArgs).toEqual(['--print', 'hello']);
+    });
+
+    it('passes through unknown flags after run', () => {
+      // These would otherwise produce "unknown flag" errors
+      const { options, errors } = parseArgs([
+        'run', '--frobnicate', '--no-such-flag', 'positional',
+      ]);
+      expect(errors).toEqual([]);
+      expect(options.command).toBe('run');
+      expect(options.passthroughArgs).toEqual(['--frobnicate', '--no-such-flag', 'positional']);
+    });
+
+    it('strips an optional leading -- separator', () => {
+      const { options } = parseArgs(['run', '--', '--print', 'hi']);
+      expect(options.command).toBe('run');
+      expect(options.passthroughArgs).toEqual(['--print', 'hi']);
+    });
+
+    it('respects --port placed before run', () => {
+      const { options } = parseArgs(['--port', '9090', 'run', '--print', 'hi']);
+      expect(options.command).toBe('run');
+      expect(options.port).toBe(9090);
+      expect(options.passthroughArgs).toEqual(['--print', 'hi']);
+    });
+
+    it('respects --log placed before run', () => {
+      const { options } = parseArgs(['--log', 'run']);
+      expect(options.command).toBe('run');
+      expect(options.log).toBe(true);
+      expect(options.passthroughArgs).toEqual([]);
+    });
+
+    it('run with no args', () => {
+      const { options, errors } = parseArgs(['run']);
+      expect(errors).toEqual([]);
+      expect(options.command).toBe('run');
+      expect(options.passthroughArgs).toEqual([]);
+    });
+
+    it('the `run` literal as a passthrough arg is not re-interpreted', () => {
+      const { options } = parseArgs(['run', 'run', 'inner']);
+      expect(options.command).toBe('run');
+      // Second `run` should be a child arg, not a re-trigger
+      expect(options.passthroughArgs).toEqual(['run', 'inner']);
+    });
   });
 });

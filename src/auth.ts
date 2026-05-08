@@ -36,7 +36,21 @@ import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
     process.env.https_proxy ||
     process.env.HTTP_PROXY ||
     process.env.http_proxy;
-  if (hasProxy) setGlobalDispatcher(new EnvHttpProxyAgent());
+  if (hasProxy) {
+    // Suppress the "EnvHttpProxyAgent is experimental" warning that undici
+    // emits on first use. The agent has been stable in practice since undici 6.
+    const origEmitWarning = process.emitWarning;
+    process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
+      const text = typeof warning === 'string' ? warning : warning.message;
+      if (text.includes('EnvHttpProxyAgent')) return;
+      return (origEmitWarning as (...a: unknown[]) => void).call(process, warning, ...rest);
+    }) as typeof process.emitWarning;
+
+    setGlobalDispatcher(new EnvHttpProxyAgent());
+
+    // Restore for any later legitimate warnings.
+    process.emitWarning = origEmitWarning;
+  }
 }
 
 const COPILOT_USER_URL = 'https://api.github.com/copilot_internal/user';

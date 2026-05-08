@@ -191,6 +191,40 @@ describe('proxy server', () => {
     });
   });
 
+  it('strips output_config.effort entirely on haiku models', async () => {
+    await withProxy({}, async (h) => {
+      await fetch(`http://127.0.0.1:${h.port}/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          messages: [],
+          output_config: { effort: 'high' },
+        }),
+      });
+      const sent = JSON.parse(lastCaptured!.body);
+      expect(sent.model).toBe('claude-haiku-4.5');
+      expect(sent.output_config).toBeUndefined();
+    });
+  });
+
+  it('preserves other output_config keys when stripping effort on haiku', async () => {
+    await withProxy({}, async (h) => {
+      await fetch(`http://127.0.0.1:${h.port}/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5',
+          messages: [],
+          output_config: { effort: 'high', other: 'preserve-me' },
+        }),
+      });
+      const sent = JSON.parse(lastCaptured!.body);
+      expect(sent.output_config.effort).toBeUndefined();
+      expect(sent.output_config.other).toBe('preserve-me');
+    });
+  });
+
   it('clamps output_config.effort to medium', async () => {
     await withProxy({}, async (h) => {
       await fetch(`http://127.0.0.1:${h.port}/v1/messages`, {
@@ -222,6 +256,95 @@ describe('proxy server', () => {
       const sent = JSON.parse(lastCaptured!.body);
       expect(sent.output_config.effort).toBe('medium');
     });
+  });
+
+  it('auto-retries with offending beta token stripped on 400', async () => {
+    // Use a separate upstream that fails on first call with a learnable error
+    // and succeeds on second call.
+    let calls = 0;
+    const adaptive = createServer((req, res) => {
+      calls += 1;
+      const chunks: Buffer[] = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        const beta = req.headers['anthropic-beta'] as string | undefined;
+        if (calls === 1) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: {
+              message: 'unsupported beta header(s): unknown-future-beta-2026-12-01',
+              code: 'invalid_request_body',
+            },
+          }));
+        } else {
+          // Verify retry stripped the bad token
+          expect(beta).not.toMatch(/unknown-future-beta-2026-12-01/);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id: 'msg_x', content: [{ type: 'text', text: 'ok' }] }));
+        }
+      });
+    });
+    await new Promise<void>(r => adaptive.listen(0, '127.0.0.1', () => r()));
+    const port = (adaptive.address() as { port: number }).port;
+    const upstream = `http://127.0.0.1:${port}`;
+
+    try {
+      const handle = await startProxy({
+        host: '127.0.0.1',
+        port: 0,
+        token: 'gho_TEST',
+        user: { ...fakeUser, endpoints: { api: upstream } },
+        upstreamBaseUrl: upstream,
+      });
+      const r = await fetch(`http://127.0.0.1:${handle.port}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'anthropic-beta': 'good-beta,unknown-future-beta-2026-12-01',
+        },
+        body: JSON.stringify({ model: 'x', messages: [] }),
+      });
+      expect(r.status).toBe(200);
+      expect(calls).toBe(2);
+      await handle.stop();
+    } finally {
+      await new Promise<void>(r => adaptive.close(() => r()));
+    }
+  });
+
+  it('does not loop-retry on non-beta 400 errors', async () => {
+    let calls = 0;
+    const stub = createServer((req, res) => {
+      calls += 1;
+      const chunks: Buffer[] = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'invalid_model', code: 'model_not_supported' } }));
+      });
+    });
+    await new Promise<void>(r => stub.listen(0, '127.0.0.1', () => r()));
+    const port = (stub.address() as { port: number }).port;
+    const upstream = `http://127.0.0.1:${port}`;
+
+    try {
+      const handle = await startProxy({
+        host: '127.0.0.1', port: 0,
+        token: 'gho_TEST',
+        user: { ...fakeUser, endpoints: { api: upstream } },
+        upstreamBaseUrl: upstream,
+      });
+      const r = await fetch(`http://127.0.0.1:${handle.port}/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'x', messages: [] }),
+      });
+      expect(r.status).toBe(400);
+      expect(calls).toBe(1); // exactly one — no retry
+      await handle.stop();
+    } finally {
+      await new Promise<void>(r => stub.close(() => r()));
+    }
   });
 
   it('drops known-incompatible anthropic-beta tokens', async () => {
