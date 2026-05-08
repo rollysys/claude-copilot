@@ -3,20 +3,24 @@
 A local Anthropic-compatible HTTP proxy that lets [Claude Code](https://claude.com/claude-code) (and any other Anthropic-API client) talk to Claude models through your **GitHub Copilot Business** subscription. **No double subscription** — every call consumes the same Copilot Premium quota the official CLI does.
 
 ```sh
-# One-liner: spawns claude with an auto-managed proxy, no env var pollution.
-$ claude-copilot run -- --print "Hello"
+# Use it exactly like `claude` itself — claude-copilot is the default action.
+$ claude-copilot --print "Hello"
 Hello!
 
-$ claude-copilot run                                # interactive Claude Code
-$ claude-copilot run -- --model opus -p "..."       # any claude flags after `--`
+$ claude-copilot                                # interactive Claude Code
+$ claude-copilot --model opus -p "..."          # any claude flag works
+$ claude-copilot resume                         # any claude subcommand works
 ```
 
-The `run` command:
-- Starts the proxy on a random local port
-- Spawns `claude` as a child with `ANTHROPIC_BASE_URL` etc. set in **the child's environment only** — your shell stays clean
-- Stops the proxy and propagates the exit code when `claude` exits
+What happens when you run `claude-copilot`:
+- A local proxy starts on a random port
+- `claude` is spawned with `ANTHROPIC_BASE_URL` etc. set in **the child's environment only** — your shell stays clean
+- When `claude` exits, the proxy stops and the exit code is propagated
 
-Three other ways to wire it up if you want a long-running daemon: see [Other usage modes](#other-usage-modes) below.
+To see claude-copilot's own help: `claude-copilot --help`.
+To see claude's help: `claude-copilot run -- --help`.
+
+If you need claude-copilot's own flags (`--log`, `--port`), use the explicit `run` form: `claude-copilot run --log -- --print "Hello"`.
 
 ---
 
@@ -87,20 +91,24 @@ cd claude-copilot && npm install && npm run build && npm link
 
 ## Usage
 
-### Recommended: `run`
+### Default mode: just type `claude-copilot`
+
+`claude-copilot` with no recognized subcommand passes everything through to `claude`:
 
 ```sh
-claude-copilot run -- --print "Hello"
-claude-copilot run                            # interactive
-claude-copilot run -- --model opus -p "..."
+claude-copilot                                  # interactive
+claude-copilot --print "Hello"
+claude-copilot --model opus -p "..."
+claude-copilot resume                           # any claude subcommand
 ```
 
-The proxy starts on a random local port and `claude` is spawned with `ANTHROPIC_BASE_URL` etc. set **in the child only**. Your shell environment is untouched. When `claude` exits, the proxy stops.
+### Setting claude-copilot's own flags: `run`
 
-`--log` enables verbose proxy logging:
+When you need to pass `--log` or `--port` to claude-copilot itself, use the explicit `run` form. Anything before `--` is for us, anything after is for claude:
 
 ```sh
-claude-copilot --log run -- -p "Compute 234*567"
+claude-copilot run --log -- --print "Compute 234*567"
+claude-copilot run --port 4242 -- --model opus
 ```
 
 ### Other usage modes
@@ -137,7 +145,8 @@ unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY \
 
 | Command | What it does |
 |---|---|
-| `claude-copilot run [-- args...]` | **Recommended.** Spawn `claude` with proxy auto-managed. |
+| `claude-copilot [args...]` *(default)* | Spawn `claude` with proxy auto-managed. Args go to claude. |
+| `claude-copilot run [--log\|--port N] [-- args...]` | Same as above, but lets you set claude-copilot flags first. |
 | `claude-copilot serve` | Start the local proxy as a long-running daemon. |
 | `claude-copilot env [--port N]` | Shell `export` snippet for wiring Claude Code manually. |
 | `claude-copilot settings [--port N]` | JSON snippet for `.claude/settings.local.json`. |

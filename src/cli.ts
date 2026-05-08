@@ -41,25 +41,30 @@ function printHelp(): void {
   process.stdout.write(`claude-copilot — local Anthropic-compatible proxy backed by GitHub Copilot
 
 Usage:
-  claude-copilot run [-- claude args...]      # easiest: spawn claude with proxy auto-attached
-  claude-copilot [serve] [--port N] [--log]   # long-running proxy daemon
-  claude-copilot env [--port N]               # shell-export snippet for ANTHROPIC_*
-  claude-copilot settings [--port N]          # JSON snippet for ~/.claude/settings.json
-  claude-copilot status                       # login info + plan + endpoint
-  claude-copilot test                         # one-shot upstream smoke test
+  claude-copilot [claude args...]              # default: spawn claude with proxy auto-attached
+  claude-copilot run [--log|--port N] [-- claude args...]
+  claude-copilot serve [--port N] [--log]      # long-running proxy daemon
+  claude-copilot env [--port N]                # shell-export snippet for ANTHROPIC_*
+  claude-copilot settings [--port N]           # JSON snippet for ~/.claude/settings.json
+  claude-copilot status                        # login info + plan + endpoint
+  claude-copilot test                          # one-shot upstream smoke test
 
-Common flags (apply to serve, env, settings):
-  -p, --port <n>     Port to listen on (default 4141)
+claude-copilot's own flags:
+  -p, --port <n>     Port to listen on (default 4141; \`run\` uses an ephemeral port unless set)
       --host <ip>    Bind address (default 127.0.0.1)
-      --log          Log every forwarded request to stderr (serve/run only)
+      --log          Log every forwarded request to stderr
   -h, --help         Show this help
 
-Recommended use:
+Daily use — no env pollution, no orphan processes:
 
-  # Single command, no env pollution, no orphan processes:
-  claude-copilot run -- --print "Hello"
-  claude-copilot run                            # interactive Claude Code
-  claude-copilot run -- --model opus --print "..."
+  claude-copilot                               # interactive Claude Code
+  claude-copilot --print "Hello"               # any claude flag passes straight through
+  claude-copilot --model opus -p "..."
+
+To set claude-copilot's own flags (e.g. --log), use the explicit \`run\`:
+
+  claude-copilot run --log -- --print "Hello"
+  claude-copilot run --port 4242 -- --model opus
 
 Long-running daemon (advanced):
 
@@ -115,7 +120,7 @@ async function runServe(options: CliOptions): Promise<void> {
       `Upstream: ${handle.upstreamBaseUrl}\n` +
       `\n` +
       `For one-shot use without setting any env vars, prefer:\n` +
-      `  claude-copilot run -- --print "Hello"\n` +
+      `  claude-copilot --print "Hello"\n` +
       `\n` +
       `Otherwise wire Claude Code to this proxy with one of:\n` +
       `  eval "$(claude-copilot env --port ${handle.port})"\n` +
