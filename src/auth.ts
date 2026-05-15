@@ -160,11 +160,19 @@ function readTokenFromLibSecret(): string | undefined {
 function readTokenFromConfigFile(): string | undefined {
   try {
     const configPath = join(homedir(), '.copilot', 'config.json');
-    const config = JSON.parse(readFileSync(configPath, 'utf8')) as {
+    const raw = readFileSync(configPath, 'utf8');
+    // The official CLI may write JSONC (with // comments). Strip those before
+    // parsing so we tolerate both plain JSON and JSONC files.
+    const cleaned = raw.replace(/^\s*\/\/.*$/gm, '');
+    const config = JSON.parse(cleaned) as {
       copilot_tokens?: Record<string, string>;
+      // Older versions of the official CLI used `copilot_tokens` (snake_case);
+      // newer versions write `copilotTokens` (camelCase). Accept both.
+      copilotTokens?: Record<string, string>;
     };
-    if (!config.copilot_tokens) return undefined;
-    for (const v of Object.values(config.copilot_tokens)) {
+    const tokens = config.copilot_tokens ?? config.copilotTokens;
+    if (!tokens) return undefined;
+    for (const v of Object.values(tokens)) {
       if (typeof v === 'string' && v.trim().length > 0) return v.trim();
     }
   } catch {

@@ -47,6 +47,34 @@ describe('readCopilotToken', () => {
     expect(readCopilotToken()).toBe('gho_FROM_CONFIG');
   });
 
+  it('reads from ~/.copilot/config.json copilotTokens (camelCase) map', async () => {
+    mkdirSync(join(tmpHome, '.copilot'));
+    writeFileSync(
+      join(tmpHome, '.copilot', 'config.json'),
+      JSON.stringify({
+        copilotTokens: { 'https://github.com:user': 'gho_FROM_CAMELCASE' },
+      })
+    );
+    Object.defineProperty(process, 'platform', { value: 'aix', configurable: true });
+    const { readCopilotToken } = await import('../src/auth.js');
+    expect(readCopilotToken()).toBe('gho_FROM_CAMELCASE');
+  });
+
+  it('reads from ~/.copilot/config.json with JSONC comments', async () => {
+    mkdirSync(join(tmpHome, '.copilot'));
+    writeFileSync(
+      join(tmpHome, '.copilot', 'config.json'),
+      '// User settings belong in settings.json.\n' +
+        JSON.stringify({
+          copilotTokens: { 'https://github.com:user': 'gho_FROM_JSONC' },
+        }) +
+        '\n'
+    );
+    Object.defineProperty(process, 'platform', { value: 'aix', configurable: true });
+    const { readCopilotToken } = await import('../src/auth.js');
+    expect(readCopilotToken()).toBe('gho_FROM_JSONC');
+  });
+
   it('throws NotLoggedIn when no token source is available', async () => {
     Object.defineProperty(process, 'platform', { value: 'aix', configurable: true });
     const { readCopilotToken, CopilotAuthError } = await import('../src/auth.js');
